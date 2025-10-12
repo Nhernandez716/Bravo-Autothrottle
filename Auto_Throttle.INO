@@ -32,10 +32,10 @@ String guid = "{977a0e68-435f-4aeb-b317-cd9212449610}"; // generated 10/10/2025
 #define AP_Disconnect 12
 
 // Variables
-int pd = 500;       // Pulse Delay period
-bool Leftsetdir = LOW; // Set Direction
-bool Rightsetdir = LOW; // Set Direction
-bool AutoThrottleActive = LOW; // Set INI Motor State // HIGH = disabled
+int pd = 2000;       // Pulse Delay period
+bool Leftsetdir; // Set Direction LOW = DOWN
+bool Rightsetdir; // Set Direction
+bool AutoThrottleActive = HIGH; // Set INI Motor State // HIGH = disabled
 
 // Logic
 bool Perform_Test = false; // Set INI var for test
@@ -43,6 +43,11 @@ bool hard_disable = false;
 bool reset_needed = false;
 bool spadInitReceived = 0;
 bool isStarted = false;
+
+int Left_Throttle_Ref_Pending = 0;
+int Right_Throttle_Ref_Pending = 0;
+bool ref_update_pending = false;
+
 
 int displayBrightnessLevel;
 
@@ -57,7 +62,7 @@ int Right_Throttle_SPAD = 0;
 void Left_Throttle_Limit (){
 
   // Reverse motor
-  Leftsetdir = !Leftsetdir;
+  //Leftsetdir = !Leftsetdir;
   //Rightsetdir = !Rightsetdir;
   
 }
@@ -66,7 +71,7 @@ void Right_Throttle_Limit (){
 
   // Reverse motor
   //Leftsetdir = !Leftsetdir;
-  Rightsetdir = !Rightsetdir;
+  //Rightsetdir = !Rightsetdir;
   
 }
 
@@ -118,7 +123,9 @@ void attachCommandCallbacks()
     messenger.attach(0, onIdentifyRequest); 
     messenger.attach(2, onSpadEvent);       
     messenger.attach(3, onUnknownCommand);
-    messenger.attach(6, onDeviceLed);  
+    //messenger.attach(5, onDeviceData);
+    messenger.attach(6, onDeviceLed); 
+    messenger.attach(7, onDeviceDisplay); 
 }
 
 void onUnknownCommand()
@@ -206,7 +213,7 @@ void onIdentifyRequest()
   messenger.sendCmdStart(0);
   messenger.sendCmdArg("OUTPUT");
   messenger.sendCmdArg(1000);
-  messenger.sendCmdArg("R_Throttle_REF");
+  messenger.sendCmdArg("L_Throttle_SPAD");
   messenger.sendCmdArg("DISPLAY");
   messenger.sendCmdArg("SPAD_DISPLAY");
   messenger.sendCmdArg("LENGTH=7");
@@ -222,7 +229,7 @@ void onIdentifyRequest()
   messenger.sendCmdStart(0);
   messenger.sendCmdArg("OUTPUT");
   messenger.sendCmdArg(2000);
-  messenger.sendCmdArg("R_Throttle_REF");
+  messenger.sendCmdArg("R_Throttle_SPAD");
   messenger.sendCmdArg("DISPLAY");
   messenger.sendCmdArg("SPAD_DISPLAY");
   messenger.sendCmdArg("LENGTH=7");
@@ -316,60 +323,106 @@ void onDeviceDisplay(){
       case 1000:
         if (displayCmd == 2) 
         {//ATC_display.showNumber((int)displayVal);
-        Left_Throttle_SPAD = (int)displayVal;}
+        Left_Throttle_SPAD = displayVal;}
         else if (displayCmd == 0) ;//ATC_display.clear();
       break;
 
       case 2000:
         if (displayCmd == 2) {//BARO_display.showNumber(displayVal);
-        Right_Throttle_SPAD = (int)displayVal;}  // Floating point number
+        Right_Throttle_SPAD = displayVal;}  // Floating point number
         else if (displayCmd == 0) ;//BARO_display.clear();
       break;
 
       case 3000:
         if (displayCmd == 2) 
         {//ATC_display.showNumber((int)displayVal);
-        Left_Throttle_Ref = (int)displayVal;}
+        //Left_Throttle_Ref = displayVal;}
+        Left_Throttle_Ref_Pending = displayVal;
+        delay(2000);
+        ref_update_pending = true;
+  }
         else if (displayCmd == 0) ;//ATC_display.clear();
       break;
 
       case 4000:
         if (displayCmd == 2) {//BARO_display.showNumber(displayVal);
-        Right_Throttle_Ref = (int)displayVal;}  // Floating point number
+        //Right_Throttle_Ref = displayVal;
+        Right_Throttle_Ref_Pending = displayVal;
+        delay(2000);
+        ref_update_pending = true;}  // Floating point number
         else if (displayCmd == 0) ;//BARO_display.clear();
       break;
   }
 }
 
-void step(){
+void step() {
+  static int temp_SPAD_LEFT_Throttle_var = 0;
+  static int temp_SPAD_RIGHT_Throttle_var = 0;
 
-    // Throttle Var's
-  // int Left_Throttle_Ref = 0;
-  // int Right_Throttle_Ref = 0;
-  // int Left_Throttle_SPAD = 0;
-  // int Right_Throttle_SPAD = 0;
+  // Safety check
+  if (hard_disable && !reset_needed) {
+    digitalWrite(ENABLE, AutoThrottleActive);
+    hard_disable = false;
+  }
 
-    if (hard_disable == true && reset_needed == false){
-      digitalWrite(ENABLE, AutoThrottleActive);
-      hard_disable = false;
-    }
-    if (Left_Throttle_SPAD != Left_Throttle_Ref){
-      if (Left_Throttle_SPAD < Left_Throttle_Ref){
+  if (digitalRead(Power_Switch) != LOW || digitalRead(PANIC_Button) != HIGH) {
+    return;
+  }
 
-      }
-    }
-    digitalWrite(LEFT_DIR,Leftsetdir);
-    digitalWrite(RIGHT_DIR,Rightsetdir);
-    digitalWrite(LEFT_STEP,HIGH);
-    digitalWrite(RIGHT_STEP,HIGH);
+  // Only update ref when current has been reached
+  if (ref_update_pending &&
+      Left_Throttle_Ref == temp_SPAD_LEFT_Throttle_var &&
+      Right_Throttle_Ref == temp_SPAD_RIGHT_Throttle_var) {
+      
+    Left_Throttle_Ref = Left_Throttle_Ref_Pending;
+    Right_Throttle_Ref = Right_Throttle_Ref_Pending;
+
+    temp_SPAD_LEFT_Throttle_var = Left_Throttle_Ref;
+    temp_SPAD_RIGHT_Throttle_var = Right_Throttle_Ref;
+
+    ref_update_pending = false;
+  }
+
+  // -------- LEFT THROTTLE --------
+  if (Left_Throttle_SPAD < Left_Throttle_Ref) {
+    Leftsetdir = LOW;
+    digitalWrite(LEFT_DIR, Leftsetdir);
+    digitalWrite(LEFT_STEP, HIGH);
     delayMicroseconds(pd);
-    digitalWrite(LEFT_STEP,LOW);
-    digitalWrite(RIGHT_STEP,LOW);
+    digitalWrite(LEFT_STEP, LOW);
     delayMicroseconds(pd);
+  } else if (Left_Throttle_SPAD > Left_Throttle_Ref) {
+    Leftsetdir = HIGH;
+    digitalWrite(LEFT_DIR, Leftsetdir);
+    digitalWrite(LEFT_STEP, HIGH);
+    delayMicroseconds(pd);
+    digitalWrite(LEFT_STEP, LOW);
+    delayMicroseconds(pd);
+  }
+
+  // -------- RIGHT THROTTLE --------
+  if (Right_Throttle_SPAD < Right_Throttle_Ref) {
+    Rightsetdir = LOW;
+    digitalWrite(RIGHT_DIR, Rightsetdir);
+    digitalWrite(RIGHT_STEP, HIGH);
+    delayMicroseconds(pd);
+    digitalWrite(RIGHT_STEP, LOW);
+    delayMicroseconds(pd);
+  } else if (Right_Throttle_SPAD > Right_Throttle_Ref) {
+    Rightsetdir = HIGH;
+    digitalWrite(RIGHT_DIR, Rightsetdir);
+    digitalWrite(RIGHT_STEP, HIGH);
+    delayMicroseconds(pd);
+    digitalWrite(RIGHT_STEP, LOW);
+    delayMicroseconds(pd);
+  }
 }
 
+
+
+
 void loop() {
-  if (isStarted){
+  
     if (digitalRead(Power_Switch) != LOW){
       hard_disable = true;
       reset_needed = false;
@@ -379,13 +432,12 @@ void loop() {
     if (digitalRead(PANIC_Button) != HIGH){
       digitalWrite(ENABLE, HIGH);
       reset_needed = true;
-    } else
-    if (ENABLE == LOW){
-    step();}
     }
-
-    step();
+       if (isStarted)
+        {
+      step();
+    }
  
-}
 
-messenger.feedinSerialData();}
+messenger.feedinSerialData();
+}}
