@@ -30,7 +30,8 @@ String guid = "{977a0e68-435f-4aeb-b317-cd9212449610}"; // generated 10/10/2025
 #define PANIC_Button 19
 #define Power_Switch 11
 
-#define AP_Disconnect 12
+#define Parking_Indicator 12
+#define ParkingBrake_Switch 18
 
 // Variables
 int pd = 1000;       // Pulse Delay period
@@ -47,6 +48,7 @@ bool isStarted = false;
 bool step_approved = false; // HIGH = disabled
 
 int displayBrightnessLevel;
+int PrkBrk_switchlast = -1;
 
 // Throttle Var's
 int Left_Throttle_Ref = 0;
@@ -91,13 +93,14 @@ void setup() {
   pinMode(RIGHT_ms3,OUTPUT);
   pinMode(L_ENABLE,OUTPUT);
   pinMode(R_ENABLE,OUTPUT);
-  pinMode(AP_Disconnect, OUTPUT);
+  pinMode(Parking_Indicator, OUTPUT);
   
   // Setup the Hall Effect switches as Inputs
   //pinMode(LEFT_HALL_SENSOR, INPUT);
   //pinMode(RIGHT_HALL_SENSOR, INPUT);
   pinMode(PANIC_Button, INPUT);
   pinMode(Power_Switch, INPUT_PULLUP);
+  pinMode(ParkingBrake_Switch, INPUT_PULLUP);
   
   // Attach interrupt pins to handlers
   //attachInterrupt(digitalPinToInterrupt(LEFT_HALL_SENSOR), Left_Throttle_Limit, FALLING);
@@ -187,7 +190,15 @@ void onIdentifyRequest()
         messenger.sendCmdArg("NO_DISPLAY_CLEAR=1");
         messenger.sendCmdEnd();
 
+//----- CREATE BUTTON -----
 
+        messenger.sendCmdStart(0);
+        messenger.sendCmdArg("INPUT");
+        messenger.sendCmdArg(1);  // This is the button ID
+        messenger.sendCmdArg("Parking_Brake");  //SPAD GUI Display name
+        messenger.sendCmdArg("PUSHBUTTON"); // Type
+        messenger.sendCmdArg("SPAD_SIMPLEBUTTON"); // Behaviour
+        messenger.sendCmdEnd();
 
 //----- CREATE LED -----
 
@@ -282,7 +293,7 @@ void onDeviceLed(){
   int32_t ledVal = messenger.readInt32Arg();      // Led value
   
   if(ledID == 1){(ledVal) ? (ToggleOn() ) : ( ToggleOff() );}
-  if(ledID == 2){(ledVal) ? (digitalWrite( AP_Disconnect, HIGH) ) : ( digitalWrite( AP_Disconnect, LOW) );}
+  if(ledID == 2){(ledVal) ? (digitalWrite( Parking_Indicator, HIGH) ) : ( digitalWrite( Parking_Indicator, LOW) );}
   //if(ledID == 3){(ledVal) ? (backlight_brightness = 50 ) : ( backlight_brightness = 0); set_backlight();}
   //if(ledID == 4){(ledVal) ? (backlight_brightness = 50 ) : ( backlight_brightness = 0); set_backlight();}
   //if(ledID == 5){(ledVal) ? (BARO_display.showString("std") ) : ( BARO_display.showNumber(BARO_global) ) ;}
@@ -463,6 +474,30 @@ void step() {
 
 }
 
+void spadButtonCheck(){
+       if (digitalRead(ParkingBrake_Switch) != PrkBrk_switchlast) 
+      {
+        if (PrkBrk_switchlast == 0)
+        {
+          PrkBrk_switchlast = 1;
+            messenger.sendCmdStart(8); // Channel no for sending input state to SPAD NEXT
+            messenger.sendCmdArg(1); // Input ID
+            messenger.sendCmdArg(0); // Value for off state
+            messenger.sendCmdEnd();
+        }
+        else 
+        {
+          PrkBrk_switchlast = 0;
+          
+            messenger.sendCmdStart(8); // Channel no for sending input state to SPAD NEXT
+            messenger.sendCmdArg(1); // Input ID
+            messenger.sendCmdArg(1); // Value for on state
+            messenger.sendCmdEnd();
+        }
+        delay(25);
+      }
+}
+
 
 void loop() {
   
@@ -479,7 +514,7 @@ void loop() {
       reset_needed = true;
     }
        if (isStarted)
-        {
+        { spadButtonCheck();
       if (step_approved){step();}}
     }
  
