@@ -1,180 +1,169 @@
 /*
   Boeing Auto Throttle Sim Kit
-  xxx.ino
-  Uses Hall Effect sensors as limit detection
+  AutoThrottle.ino
+  Uses Hall Effect sensors as limit detection (reserved, currently commented)
   Uses A4988 Stepper Motor Driver module
-  
+  Communicates with SPAD.neXt via CmdMessenger over Serial
 */
 
 #include <CmdMessenger.h>
 CmdMessenger messenger(Serial);
 
-String authkey = "d4908fd34123c5d12f043398d1b48052";
-String guid = "{977a0e68-435f-4aeb-b317-cd9212449610}"; // generated 10/10/2025
+const String authkey = "d4908fd34123c5d12f043398d1b48052";
+const String guid    = "{977a0e68-435f-4aeb-b317-cd9212449610}";
 
-// Define connections
-//#define LEFT_HALL_SENSOR 18
-//#define RIGHT_HALL_SENSOR 19
-#define LEFT_DIR 5
-#define LEFT_STEP 4
-#define RIGHT_DIR 2
-#define RIGHT_STEP 3
-#define L_ENABLE 6
-#define R_ENABLE 7
-#define LEFT_ms1 8
-#define LEFT_ms2 9
-#define LEFT_ms3 10
-#define RIGHT_ms1 14
-#define RIGHT_ms2 15
-#define RIGHT_ms3 16
-#define PANIC_Button 19
-#define Power_Switch 11
+// ── Pin Definitions ───────────────────────────────────────────
+// Left stepper
+#define LEFT_DIR      7
+#define LEFT_STEP     6
+#define L_ENABLE      4
+#define LEFT_MS_PINS  5
 
-#define Parking_Indicator 12
-#define ParkingBrake_Switch 18
+// Right stepper
+#define RIGHT_DIR     12
+#define RIGHT_STEP    11
+#define R_ENABLE      9
+#define RIGHT_MS_PINS 10
 
-// Variables
-int pd = 1000;       // Pulse Delay period
-bool Leftsetdir; // Set Direction LOW = DOWN
-bool Rightsetdir; // Set Direction
-bool AutoThrottleActive = LOW; // Set INI Motor State // HIGH = disabled
+// Misc I/O  (Power_Switch removed; Parking_Indicator moved to unused pin 3)
+#define PANIC_BUTTON       19
+#define PARKING_INDICATOR   3   // was conflicting with RIGHT_DIR (12) — moved to pin 3
+#define PARKING_BRAKE_SWITCH 18
 
-// Logic
-bool Perform_Test = false; // Set INI var for test
-bool hard_disable = false;
-bool reset_needed = false;
-bool spadInitReceived = 0;
-bool isStarted = false;
-bool step_approved = false; // HIGH = disabled
+// Hall effect limit sensors (reserved for future use)
+// #define LEFT_HALL_SENSOR  2
+// #define RIGHT_HALL_SENSOR 20
 
-int displayBrightnessLevel;
-int PrkBrk_switchlast = -1;
+// ── Speed Thresholds (µs pulse delay — lower = faster) ────────
+const int SPEED_FASTEST = 100;
+const int SPEED_FASTER  = 200;
+const int SPEED_NORMAL  = 500;
+const int SPEED_SLOW    = 1000;
 
-// Throttle Var's
-int Left_Throttle_Ref = 0;
-int Right_Throttle_Ref = 0;
-int Left_Throttle_SPAD = 0;
-int Right_Throttle_SPAD = 0;
+// ── State Variables ───────────────────────────────────────────
+bool autoThrottleActive = HIGH; // HIGH = motors disabled on boot
+bool stepApproved       = false;
+bool isStarted          = false;
 
-// Interrupt Handlers
+int  prkBrkSwitchLast = -1;
 
-void Left_Throttle_Limit (){
+// ── Throttle Positions ────────────────────────────────────────
+volatile int leftThrottleSPAD  = 0;  // Current sim position (left)
+volatile int rightThrottleSPAD = 0;  // Current sim position (right)
+volatile int leftThrottleRef   = 0;  // Target position (left)
+volatile int rightThrottleRef  = 0;  // Target position (right)
 
-  // Reverse motor
-  //Leftsetdir = !Leftsetdir;
-  //Rightsetdir = !Rightsetdir;
-  
+// ── Helpers ───────────────────────────────────────────────────
+
+// Returns the pulse delay (µs) based on how far away the target is
+int speedForDiff(int diff) {
+  if (diff >= 10) return SPEED_FASTEST;
+  if (diff >= 3)  return SPEED_FASTER;
+  if (diff == 2)  return SPEED_NORMAL;
+  return SPEED_SLOW;
 }
 
-void Right_Throttle_Limit (){
-
-  // Reverse motor
-  //Leftsetdir = !Leftsetdir;
-  //Rightsetdir = !Rightsetdir;
-  
+// Sends one step pulse on the given STEP pin with the given delay
+void pulseStep(uint8_t stepPin, int pulseDelay) {
+  digitalWrite(stepPin, HIGH);
+  delayMicroseconds(pulseDelay);
+  digitalWrite(stepPin, LOW);
+  delayMicroseconds(pulseDelay);
 }
 
+// Enable or disable both motor drivers
+void setMotorEnable(bool enable) {
+  // A4988 ENABLE is active-LOW: LOW = enabled, HIGH = disabled
+  uint8_t val = enable ? LOW : HIGH;
+  digitalWrite(L_ENABLE, val);
+  digitalWrite(R_ENABLE, val);
+}
 
+// ── Limit Switch ISRs (reserved) ──────────────────────────────
+// void leftThrottleLimit()  { /* reverse or halt left motor */ }
+// void rightThrottleLimit() { /* reverse or halt right motor */ }
 
+// ── Setup ─────────────────────────────────────────────────────
 void setup() {
-
   Serial.begin(115200);
-  
-  // Setup the stepper controller pins as Outputs
-  pinMode(LEFT_DIR,OUTPUT); 
-  pinMode(LEFT_STEP,OUTPUT);
-  pinMode(RIGHT_DIR,OUTPUT); 
-  pinMode(RIGHT_STEP,OUTPUT);
-  pinMode(LEFT_ms1,OUTPUT);
-  pinMode(LEFT_ms2,OUTPUT);
-  pinMode(LEFT_ms3,OUTPUT);
-  pinMode(RIGHT_ms1,OUTPUT);
-  pinMode(RIGHT_ms2,OUTPUT);
-  pinMode(RIGHT_ms3,OUTPUT);
-  pinMode(L_ENABLE,OUTPUT);
-  pinMode(R_ENABLE,OUTPUT);
-  pinMode(Parking_Indicator, OUTPUT);
-  
-  // Setup the Hall Effect switches as Inputs
-  //pinMode(LEFT_HALL_SENSOR, INPUT);
-  //pinMode(RIGHT_HALL_SENSOR, INPUT);
-  pinMode(PANIC_Button, INPUT);
-  pinMode(Power_Switch, INPUT_PULLUP);
-  pinMode(ParkingBrake_Switch, INPUT_PULLUP);
-  
-  // Attach interrupt pins to handlers
-  //attachInterrupt(digitalPinToInterrupt(LEFT_HALL_SENSOR), Left_Throttle_Limit, FALLING);
-  //attachInterrupt(digitalPinToInterrupt(RIGHT_HALL_SENSOR), Right_Throttle_Limit, FALLING);
 
-  // Digital Write
-  digitalWrite(LEFT_ms1, HIGH);
-  digitalWrite(LEFT_ms2, HIGH);
-  digitalWrite(LEFT_ms3, HIGH);
-  digitalWrite(RIGHT_ms1, HIGH);
-  digitalWrite(RIGHT_ms2, HIGH);
-  digitalWrite(RIGHT_ms3, HIGH);
-  digitalWrite(L_ENABLE, AutoThrottleActive);
-  digitalWrite(R_ENABLE, AutoThrottleActive);
+  // Stepper outputs
+  pinMode(LEFT_DIR,      OUTPUT);
+  pinMode(LEFT_STEP,     OUTPUT);
+  pinMode(RIGHT_DIR,     OUTPUT);
+  pinMode(RIGHT_STEP,    OUTPUT);
+  pinMode(LEFT_MS_PINS,  OUTPUT);
+  pinMode(RIGHT_MS_PINS, OUTPUT);
+  pinMode(L_ENABLE,      OUTPUT);
+  pinMode(R_ENABLE,      OUTPUT);
 
-   attachCommandCallbacks();
+  // Misc outputs
+  pinMode(PARKING_INDICATOR, OUTPUT);
+
+
+  // Inputs
+  pinMode(PANIC_BUTTON,        INPUT);
+  pinMode(PARKING_BRAKE_SWITCH, INPUT_PULLUP);
+
+  // Hall effect interrupts (reserved)
+  // pinMode(LEFT_HALL_SENSOR,  INPUT);
+  // pinMode(RIGHT_HALL_SENSOR, INPUT);
+  // attachInterrupt(digitalPinToInterrupt(LEFT_HALL_SENSOR),  leftThrottleLimit,  FALLING);
+  // attachInterrupt(digitalPinToInterrupt(RIGHT_HALL_SENSOR), rightThrottleLimit, FALLING);
+
+  // Microstepping: set MS pins HIGH (1/16 step or per your driver config)
+  digitalWrite(LEFT_MS_PINS,  HIGH);
+  digitalWrite(RIGHT_MS_PINS, HIGH);
+
+  // Start with motors disabled
+  setMotorEnable(false);
+
+  attachCommandCallbacks();
 }
 
-void attachCommandCallbacks()
-{
-    messenger.sendCmd(3, "ATTACHING CALLBACKS!");
-    messenger.attach(0, onIdentifyRequest); 
-    messenger.attach(2, onSpadEvent);       
-    messenger.attach(3, onUnknownCommand);
-    //messenger.attach(5, onDeviceData);
-    messenger.attach(6, onDeviceLed); 
-    messenger.attach(7, onDeviceDisplay); 
+// ── CmdMessenger Callbacks ────────────────────────────────────
+void attachCommandCallbacks() {
+  messenger.sendCmd(3, "ATTACHING CALLBACKS!");
+  messenger.attach(0, onIdentifyRequest);
+  messenger.attach(2, onSpadEvent);
+  messenger.attach(3, onUnknownCommand);
+  messenger.attach(6, onDeviceLed);
+  messenger.attach(7, onDeviceDisplay);
 }
 
-void onUnknownCommand()
-{
-  messenger.sendCmd(3, "UNKNOWN COMMAND"); 
+void onUnknownCommand() {
+  messenger.sendCmd(3, "UNKNOWN COMMAND");
 }
 
-
-void onSpadEvent()
-{
+void onSpadEvent() {
   char *szEvent = messenger.readStringArg();
-  if (strcmp(szEvent, "START") == 0) { // SPAD tells device, it's ok to send input now
-    isStarted = 1;
-    return;
-  }
-  if (strcmp(szEvent, "END") == 0) { // SPAD tells device it will exit now
-    isStarted = 0;
-    return;
-  }
+  if (strcmp(szEvent, "START") == 0) { isStarted = true;  return; }
+  if (strcmp(szEvent, "END")   == 0) { isStarted = false; return; }
 }
 
-void onIdentifyRequest()
-{
+void onIdentifyRequest() {
   char *szRequest = messenger.readStringArg();
 
-  if (strcmp(szRequest, "INIT") == 0)
-    {
-        messenger.sendCmdStart(0);
-        messenger.sendCmdArg("SPAD");
-        messenger.sendCmdArg(guid); // GUID  
-        messenger.sendCmdArg("Auto Throttle"); // DEVICE DISPLAY NAME
-        messenger.sendCmdArg(2); // SPAD SERIAL VERSION, DON'T CHANGE
-        messenger.sendCmdArg("1"); // DEVICE VERSION NUMBER        
-        messenger.sendCmdArg("AUTHOR="+authkey); // AUTHOR ID - Edit the variable on top part of the code and remove // at the beginning of this line to activate your  auth code.     
-        messenger.sendCmdEnd();
-        return;
-    }
-    
-  if (strcmp(szRequest, "SCANSTATE") == 0)
-    {
-        messenger.sendCmdStart(0);
-        messenger.sendCmdArg("STATESCAN");
-        messenger.sendCmdEnd();
-        return;
-    }
+  if (strcmp(szRequest, "INIT") == 0) {
+    messenger.sendCmdStart(0);
+    messenger.sendCmdArg("SPAD");
+    messenger.sendCmdArg(guid);
+    messenger.sendCmdArg("Auto Throttle");
+    messenger.sendCmdArg(2);
+    messenger.sendCmdArg("1");
+    messenger.sendCmdArg("AUTHOR=" + authkey);
+    messenger.sendCmdEnd();
+    return;
+  }
 
-  if (strcmp(szRequest, "PING") == 0){
+  if (strcmp(szRequest, "SCANSTATE") == 0) {
+    messenger.sendCmdStart(0);
+    messenger.sendCmdArg("STATESCAN");
+    messenger.sendCmdEnd();
+    return;
+  }
+
+  if (strcmp(szRequest, "PING") == 0) {
     messenger.sendCmdStart(0);
     messenger.sendCmdArg("PONG");
     messenger.sendCmdArg(messenger.readInt32Arg());
@@ -182,23 +171,24 @@ void onIdentifyRequest()
     return;
   }
 
-  if (strcmp(szRequest, "CONFIG") == 0){
-        messenger.sendCmdStart(0);
-        messenger.sendCmdArg("OPTION");
-        messenger.sendCmdArg("ISGENERIC=1");
-        messenger.sendCmdArg("PAGESUPPORT=1");
-        messenger.sendCmdArg("NO_DISPLAY_CLEAR=1");
-        messenger.sendCmdEnd();
+  if (strcmp(szRequest, "CONFIG") == 0) {
 
-//----- CREATE BUTTON -----
+    // Options
+    messenger.sendCmdStart(0);
+    messenger.sendCmdArg("OPTION");
+    messenger.sendCmdArg("ISGENERIC=1");
+    messenger.sendCmdArg("PAGESUPPORT=1");
+    messenger.sendCmdArg("NO_DISPLAY_CLEAR=1");
+    messenger.sendCmdEnd();
 
-        messenger.sendCmdStart(0);
-        messenger.sendCmdArg("INPUT");
-        messenger.sendCmdArg(1);  // This is the button ID
-        messenger.sendCmdArg("Parking_Brake");  //SPAD GUI Display name
-        messenger.sendCmdArg("PUSHBUTTON"); // Type
-        messenger.sendCmdArg("SPAD_SIMPLEBUTTON"); // Behaviour
-        messenger.sendCmdEnd();
+    // INPUT: Parking Brake button
+    messenger.sendCmdStart(0);
+    messenger.sendCmdArg("INPUT");
+    messenger.sendCmdArg(1);
+    messenger.sendCmdArg("Parking_Brake");
+    messenger.sendCmdArg("PUSHBUTTON");
+    messenger.sendCmdArg("SPAD_SIMPLEBUTTON");
+    messenger.sendCmdEnd();
 
 //----- CREATE LED -----
 
@@ -213,310 +203,153 @@ void onIdentifyRequest()
         messenger.sendCmdStart(0);
         messenger.sendCmdArg("OUTPUT");
         messenger.sendCmdArg(2);             // This is the LED ID 
+        messenger.sendCmdArg("PARKINGBREAK_LED");    //SPAD GUI Display name
+        messenger.sendCmdArg("LED");   // Type
+        messenger.sendCmdArg("SPAD_LED");  // Behaviour
+        messenger.sendCmdEnd();
+
+        messenger.sendCmdStart(0);
+        messenger.sendCmdArg("OUTPUT");
+        messenger.sendCmdArg(3);             // This is the LED ID 
         messenger.sendCmdArg("AUTOBREAK_LED");    //SPAD GUI Display name
         messenger.sendCmdArg("LED");   // Type
         messenger.sendCmdArg("SPAD_LED");  // Behaviour
         messenger.sendCmdEnd();
 
-       	//----- CREATE displays brightness control channel 11
-  //messenger.sendCmd(0,F("OUTPUT,4000,D_active2,DISPLAY,SPAD_DISPLAY,LENGTH=7,ROW=1,WIDTH=150,HEIGHT=40,FOREGROUND=#FFFFFF,ORDER=3,UI.ROW=0"));delay(50);
-  messenger.sendCmdStart(0);
-  messenger.sendCmdArg("OUTPUT");
-  messenger.sendCmdArg(1000);
-  messenger.sendCmdArg("L_Throttle_SPAD");
-  messenger.sendCmdArg("DISPLAY");
-  messenger.sendCmdArg("SPAD_DISPLAY");
-  messenger.sendCmdArg("LENGTH=7");
-  messenger.sendCmdArg("ROW=1");
-  messenger.sendCmdArg("WIDTH=150");
-  messenger.sendCmdArg("HEIGHT=40");
-  //messenger.sendCmdArg("FOREGROUND=#FFFFFF");
-  //messenger.sendCmdArg("ORDER=3");
-  //messenger.sendCmdArg("UI.ROW=0");
-  messenger.sendCmdEnd();
+    // OUTPUT: Left throttle SPAD position (id 1000)
+    sendDisplayOutput(1000, "L_Throttle_SPAD");
 
-  //messenger.sendCmd(0,F("OUTPUT,4000,D_active2,DISPLAY,SPAD_DISPLAY,LENGTH=7,ROW=1,WIDTH=150,HEIGHT=40,FOREGROUND=#FFFFFF,ORDER=3,UI.ROW=0"));delay(50);
-  messenger.sendCmdStart(0);
-  messenger.sendCmdArg("OUTPUT");
-  messenger.sendCmdArg(2000);
-  messenger.sendCmdArg("R_Throttle_SPAD");
-  messenger.sendCmdArg("DISPLAY");
-  messenger.sendCmdArg("SPAD_DISPLAY");
-  messenger.sendCmdArg("LENGTH=7");
-  messenger.sendCmdArg("ROW=1");
-  messenger.sendCmdArg("WIDTH=150");
-  messenger.sendCmdArg("HEIGHT=40");
-  //messenger.sendCmdArg("FOREGROUND=#FFFFFF");
-  //messenger.sendCmdArg("ORDER=3");
-  //messenger.sendCmdArg("UI.ROW=0");
-  messenger.sendCmdEnd();
-// RADIO 6 digit displays 3000, 4000, 5000, 6000 (lenth = 7 to account for decimel)
-  //messenger.sendCmd(0,F("OUTPUT,3000,D_active1,DISPLAY,SPAD_DISPLAY,LENGTH=7,ROW=1,WIDTH=150,HEIGHT=40,FOREGROUND=#FFFFFF,ORDER=3,UI.ROW=0"));delay(50);
-  messenger.sendCmdStart(0);
-  messenger.sendCmdArg("OUTPUT");
-  messenger.sendCmdArg(3000);
-  messenger.sendCmdArg("L_Throttle_REF");
-  messenger.sendCmdArg("DISPLAY");
-  messenger.sendCmdArg("SPAD_DISPLAY");
-  messenger.sendCmdArg("LENGTH=7");
-  messenger.sendCmdArg("ROW=1");
-  messenger.sendCmdArg("WIDTH=150");
-  messenger.sendCmdArg("HEIGHT=40");
-  //messenger.sendCmdArg("FOREGROUND=#FFFFFF");
-  //messenger.sendCmdArg("ORDER=3");
-  //messenger.sendCmdArg("UI.ROW=0");
-  messenger.sendCmdEnd();
-  //messenger.sendCmd(0,F("OUTPUT,4000,D_active2,DISPLAY,SPAD_DISPLAY,LENGTH=7,ROW=1,WIDTH=150,HEIGHT=40,FOREGROUND=#FFFFFF,ORDER=3,UI.ROW=0"));delay(50);
-  messenger.sendCmdStart(0);
-  messenger.sendCmdArg("OUTPUT");
-  messenger.sendCmdArg(4000);
-  messenger.sendCmdArg("R_Throttle_REF");
-  messenger.sendCmdArg("DISPLAY");
-  messenger.sendCmdArg("SPAD_DISPLAY");
-  messenger.sendCmdArg("LENGTH=7");
-  messenger.sendCmdArg("ROW=1");
-  messenger.sendCmdArg("WIDTH=150");
-  messenger.sendCmdArg("HEIGHT=40");
-  //messenger.sendCmdArg("FOREGROUND=#FFFFFF");
-  //messenger.sendCmdArg("ORDER=3");
-  //messenger.sendCmdArg("UI.ROW=0");
-  messenger.sendCmdEnd();
-//-----  END CONFIG ----
+    // OUTPUT: Right throttle SPAD position (id 2000)
+    sendDisplayOutput(2000, "R_Throttle_SPAD");
 
-      messenger.sendCmd(0, "CONFIG");
-      return;
-    }
-}
+    // OUTPUT: Left throttle reference/target (id 3000)
+    sendDisplayOutput(3000, "L_Throttle_REF");
 
-void onDeviceLed(){ 
-  int32_t ledID = messenger.readInt32Arg();       // Led ID
-  int32_t ledVal = messenger.readInt32Arg();      // Led value
-  
-  if(ledID == 1){(ledVal) ? (ToggleOn() ) : ( ToggleOff() );}
-  if(ledID == 2){(ledVal) ? (digitalWrite( Parking_Indicator, HIGH) ) : ( digitalWrite( Parking_Indicator, LOW) );}
-  //if(ledID == 3){(ledVal) ? (backlight_brightness = 50 ) : ( backlight_brightness = 0); set_backlight();}
-  //if(ledID == 4){(ledVal) ? (backlight_brightness = 50 ) : ( backlight_brightness = 0); set_backlight();}
-  //if(ledID == 5){(ledVal) ? (BARO_display.showString("std") ) : ( BARO_display.showNumber(BARO_global) ) ;}
+    // OUTPUT: Right throttle reference/target (id 4000)
+    sendDisplayOutput(4000, "R_Throttle_REF");
 
-}
-
-void ToggleOn(){
-    step_approved = true;
-
-}
-
-void ToggleOff(){
-    digitalWrite(L_ENABLE, HIGH);
-    digitalWrite(R_ENABLE, HIGH);
-    step_approved = false;
-}
-
-// ------------------------ PROCESS FUNCTIONS--------------------
-void onDeviceData(){ 
-  int32_t dataID = messenger.readInt32Arg();       // Data ID
-  int32_t dataVal = messenger.readInt32Arg();      // Data value
-
-  // Nothing to do yet
-}
-
-void onDeviceControlDisplayBrightness(){ 
-  int32_t dataVal = messenger.readInt32Arg();      // Data value on channel 11
-  // Led Displays Brightness (0 to 15)
-  if (dataVal >= 0 && dataVal < 16)
-  {
-    //lc_squawk.setIntensity(0,dataVal);
-    displayBrightnessLevel = dataVal;
+    messenger.sendCmd(0, "CONFIG");
+    return;
   }
 }
 
-void onDeviceDisplay(){ 
-  int32_t displayID = messenger.readInt32Arg();       // Display ID
-  int32_t displayRow = messenger.readInt32Arg();      // Display Row
-  int32_t displayCmd = messenger.readInt32Arg();      // Display Command (0 turn off, 1 turn on, 2 update)
-  double displayVal = messenger.readDoubleArg();      // Display value
-  int squack_code;
-  // Throttle Var's
-  // int Left_Throttle_Ref = 0;
-  // int Right_Throttle_Ref = 0;
-  // int Left_Throttle_SPAD = 0;
-  // int Right_Throttle_SPAD = 0;
+// Shared helper to reduce repetition in CONFIG block
+void sendDisplayOutput(int id, const char* name) {
+  messenger.sendCmdStart(0);
+  messenger.sendCmdArg("OUTPUT");
+  messenger.sendCmdArg(id);
+  messenger.sendCmdArg(name);
+  messenger.sendCmdArg("DISPLAY");
+  messenger.sendCmdArg("SPAD_DISPLAY");
+  messenger.sendCmdArg("LENGTH=7");
+  messenger.sendCmdArg("ROW=1");
+  messenger.sendCmdArg("WIDTH=150");
+  messenger.sendCmdArg("HEIGHT=40");
+  messenger.sendCmdEnd();
+}
+
+void onDeviceLed() {
+  int32_t ledID  = messenger.readInt32Arg();
+  int32_t ledVal = messenger.readInt32Arg();
+
+  if (ledID == 1) {
+    // Software enable gate for steppers
+    ledVal ? enableSteppers() : disableSteppers();
+  }
+  if (ledID == 2) {
+    digitalWrite(PARKING_INDICATOR, ledVal ? HIGH : LOW);
+  }
+  
+}
+
+void enableSteppers() {
+  stepApproved = true;
+  // Motors will be enabled inside step() only when movement is needed
+}
+
+void disableSteppers() {
+  setMotorEnable(false);
+  stepApproved = false;
+}
+
+void onDeviceDisplay() {
+  int32_t displayID  = messenger.readInt32Arg();
+  int32_t displayRow = messenger.readInt32Arg();  // unused but must be read
+  int32_t displayCmd = messenger.readInt32Arg();
+  double  displayVal = messenger.readDoubleArg();
+
   switch (displayID) {
-      case 1000:
-        if (displayCmd == 2) 
-        {//ATC_display.showNumber((int)displayVal);
-        Left_Throttle_SPAD = displayVal;}
-        else if (displayCmd == 0) ;//ATC_display.clear();
+    case 1000:
+      if (displayCmd == 2) leftThrottleSPAD  = (int)displayVal;
       break;
-
-      case 2000:
-        if (displayCmd == 2) {//BARO_display.showNumber(displayVal);
-        Right_Throttle_SPAD = displayVal;}  // Floating point number
-        else if (displayCmd == 0) ;//BARO_display.clear();
+    case 2000:
+      if (displayCmd == 2) rightThrottleSPAD = (int)displayVal;
       break;
-
-      case 3000:
-        if (displayCmd == 2) 
-        {//ATC_display.showNumber((int)displayVal);
-        Left_Throttle_Ref = displayVal;}
-        else if (displayCmd == 0) ;//ATC_display.clear();
+    case 3000:
+      if (displayCmd == 2) leftThrottleRef   = (int)displayVal;
       break;
-
-      case 4000:
-        if (displayCmd == 2) {//BARO_display.showNumber(displayVal);
-        Right_Throttle_Ref = displayVal;}  // Floating point number
-        else if (displayCmd == 0) ;//BARO_display.clear();
+    case 4000:
+      if (displayCmd == 2) rightThrottleRef  = (int)displayVal;
       break;
   }
 }
 
+// ── Motor Step Logic ──────────────────────────────────────────
 void step() {
-  int Left_Throttle_Diff;
-  int Right_Throttle_Diff;
 
+  // ── LEFT THROTTLE ─────────────────────────────────────────
+  int leftDiff = leftThrottleRef - leftThrottleSPAD;
 
-
-  // -------- LEFT THROTTLE --------
-  if (Left_Throttle_SPAD < Left_Throttle_Ref) {
-    digitalWrite( L_ENABLE, LOW);
-    digitalWrite( R_ENABLE, LOW);
-    Left_Throttle_Diff = Left_Throttle_Ref - Left_Throttle_SPAD;
-    if (Left_Throttle_Diff >= 10){
-      pd = 500;
-    } else if (Left_Throttle_Diff <= 9 && Left_Throttle_Diff >= 3){
-      pd = 1000;
-    } else if (Left_Throttle_Diff == 2){
-      pd = 2000;
-    } else if (Left_Throttle_Diff == 1){
-      pd = 5000;
-    }
-    // Move forward (adjust direction as needed)
-    Leftsetdir = HIGH;
-    digitalWrite(LEFT_DIR, Leftsetdir);
-
-    digitalWrite(LEFT_STEP, HIGH);
-    delayMicroseconds(pd);
-    digitalWrite(LEFT_STEP, LOW);
-    delayMicroseconds(pd);
+  if (leftDiff != 0) {
+    int pd = speedForDiff(abs(leftDiff));
+    setMotorEnable(true);
+    // Positive diff → ref is higher → lever needs to go UP
+    digitalWrite(LEFT_DIR, leftDiff > 0 ? HIGH : LOW);
+    pulseStep(LEFT_STEP, pd);
   }
-  else if (Left_Throttle_SPAD > Left_Throttle_Ref) {
-    digitalWrite( L_ENABLE, LOW);
-    digitalWrite( R_ENABLE, LOW);
-    Left_Throttle_Diff = Left_Throttle_SPAD - Left_Throttle_Ref;
-    if (Left_Throttle_Diff >= 10){
-      pd = 500;
-    } else if (Left_Throttle_Diff <= 9 && Left_Throttle_Diff >= 3){
-      pd = 1000;
-    } else if (Left_Throttle_Diff == 2){
-      pd = 2000;
-    } else if (Left_Throttle_Diff == 1){
-      pd = 5000;
-    }
-    // Move reverse
-    Leftsetdir = LOW;
-    digitalWrite(LEFT_DIR, Leftsetdir);
 
-    digitalWrite(LEFT_STEP, HIGH);
-    delayMicroseconds(pd);
-    digitalWrite(LEFT_STEP, LOW);
-    delayMicroseconds(pd);
+  // ── RIGHT THROTTLE ────────────────────────────────────────
+  int rightDiff = rightThrottleRef - rightThrottleSPAD;
+
+  if (rightDiff != 0) {
+    int pd = speedForDiff(abs(rightDiff));
+    setMotorEnable(true);
+    // Positive diff → ref is higher → lever needs to go UP
+    // RIGHT motor is physically mirrored, so direction is inverted
+    digitalWrite(RIGHT_DIR, rightDiff > 0 ? LOW : HIGH);
+    pulseStep(RIGHT_STEP, pd);
   }
-  // Else do nothing if equal
 
-
-  // -------- RIGHT THROTTLE --------
-  if (Right_Throttle_SPAD < Right_Throttle_Ref) {
-    digitalWrite( L_ENABLE, LOW);
-    digitalWrite( R_ENABLE, LOW);
-        Right_Throttle_Diff = Right_Throttle_SPAD - Right_Throttle_Ref;
-    if (Right_Throttle_Diff >= 10){
-      pd = 500;
-    } else if (Right_Throttle_Diff <= 9 && Right_Throttle_Diff >= 3){
-      pd = 1000;
-    } else if (Right_Throttle_Diff == 2){
-      pd = 2000;
-    }
-    else if (Right_Throttle_Diff == 1){
-      pd = 5000;
-    }
-    // Move forward
-    Rightsetdir = LOW;
-    digitalWrite(RIGHT_DIR, Rightsetdir);
-
-    digitalWrite(RIGHT_STEP, HIGH);
-    delayMicroseconds(pd);
-    digitalWrite(RIGHT_STEP, LOW);
-    delayMicroseconds(pd);
+  // Disable motors when both throttles are at target (saves heat/power)
+  if (leftDiff == 0 && rightDiff == 0) {
+    setMotorEnable(false);
   }
-  else if (Right_Throttle_SPAD > Right_Throttle_Ref) {
-    digitalWrite( L_ENABLE, LOW);
-    digitalWrite( R_ENABLE, LOW);
-        Right_Throttle_Diff = Right_Throttle_SPAD - Right_Throttle_Ref;
-    if (Right_Throttle_Diff >= 10){
-      pd = 500;
-    } else if (Right_Throttle_Diff <= 9 && Right_Throttle_Diff >= 3){
-      pd = 1000;
-    } else if (Right_Throttle_Diff == 2){
-      pd = 2000;
-    }
-    else if (Right_Throttle_Diff == 1){
-      pd = 5000;
-    }
-    // Move reverse
-    Rightsetdir = HIGH;
-    digitalWrite(RIGHT_DIR, Rightsetdir);
-
-    digitalWrite(RIGHT_STEP, HIGH);
-    delayMicroseconds(pd);
-    digitalWrite(RIGHT_STEP, LOW);
-    delayMicroseconds(pd);
-  }
-  // Else do nothing if equal
-
 }
 
-void spadButtonCheck(){
-       if (digitalRead(ParkingBrake_Switch) != PrkBrk_switchlast) 
-      {
-        if (PrkBrk_switchlast == 0)
-        {
-          PrkBrk_switchlast = 1;
-            messenger.sendCmdStart(8); // Channel no for sending input state to SPAD NEXT
-            messenger.sendCmdArg(1); // Input ID
-            messenger.sendCmdArg(0); // Value for off state
-            messenger.sendCmdEnd();
-        }
-        else 
-        {
-          PrkBrk_switchlast = 0;
-          
-            messenger.sendCmdStart(8); // Channel no for sending input state to SPAD NEXT
-            messenger.sendCmdArg(1); // Input ID
-            messenger.sendCmdArg(1); // Value for on state
-            messenger.sendCmdEnd();
-        }
-        delay(25);
-      }
+// ── Parking Brake Button ──────────────────────────────────────
+void spadButtonCheck() {
+  int currentState = digitalRead(PARKING_BRAKE_SWITCH);
+
+  if (currentState != prkBrkSwitchLast) {
+    prkBrkSwitchLast = currentState;
+
+    messenger.sendCmdStart(8);
+    messenger.sendCmdArg(1);                            // Input ID
+    messenger.sendCmdArg(currentState == LOW ? 1 : 0); // Active-LOW: pressed = LOW = on
+    messenger.sendCmdEnd();
+
+    delay(25); // debounce
+  }
 }
 
-
+// ── Main Loop ─────────────────────────────────────────────────
 void loop() {
-  
-    if (digitalRead(Power_Switch) != LOW){
-      hard_disable = true;
-      reset_needed = false;
-      digitalWrite(L_ENABLE, HIGH);
-      digitalWrite(R_ENABLE, HIGH);
-      }
-    else{
-    if (digitalRead(PANIC_Button) != HIGH){
-      digitalWrite(L_ENABLE, HIGH);
-      digitalWrite(R_ENABLE, HIGH);
-      reset_needed = true;
-    }
-       if (isStarted)
-        { spadButtonCheck();
-      if (step_approved){step();}}
-    }
- 
+  messenger.feedinSerialData();
 
-messenger.feedinSerialData();}
+  if (isStarted) {
+    spadButtonCheck();
+    if (stepApproved) {
+      step();
+    }
+  }
+}
